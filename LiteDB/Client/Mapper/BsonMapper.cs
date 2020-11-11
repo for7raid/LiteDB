@@ -493,7 +493,7 @@ namespace LiteDB
                 return bsonDocument;
             };
 
-            member.Deserialize = (bson, m) =>
+            member.Deserialize = (bson, m, memCache) =>
             {
                 // if not a document (maybe BsonValue.null) returns null
                 if (bson == null || bson.IsDocument == false) return null;
@@ -513,7 +513,7 @@ namespace LiteDB
                         doc["_type"] = bson["$type"];
                     }
 
-                    return m.Deserialize(entity.ForType, doc);
+                    return m.Deserialize(entity.ForType, doc, memCache);
                     
                 }
                 else
@@ -521,7 +521,7 @@ namespace LiteDB
                     return m.Deserialize(entity.ForType,
                         doc.ContainsKey("$type") ?
                             new BsonDocument { ["_id"] = idRef, ["_type"] = bson["$type"] } :
-                            new BsonDocument { ["_id"] = idRef }); // if has $id, deserialize object using only _id object
+                            new BsonDocument { ["_id"] = idRef }, memCache); // if has $id, deserialize object using only _id object
                 }
 
             };
@@ -566,13 +566,13 @@ namespace LiteDB
                 return result;
             };
 
-            member.Deserialize = (bson, m) =>
+            member.Deserialize = (bson, m, memCahce) =>
             {
                 if (bson.IsArray == false) return null;
 
                 var array = bson.AsArray;
 
-                if (array.Count == 0) return m.Deserialize(member.DataType, array);
+                if (array.Count == 0) return m.Deserialize(member.DataType, array, memCahce);
 
                 // copy array changing $id to _id
                 var result = new BsonArray();
@@ -614,7 +614,7 @@ namespace LiteDB
 
                 }
 
-                return m.Deserialize(member.DataType, result);
+                return m.Deserialize(member.DataType, result, memCahce);
             };
         }
 

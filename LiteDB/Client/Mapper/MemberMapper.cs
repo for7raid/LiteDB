@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Reflection;
 using static LiteDB.Constants;
 
@@ -47,7 +48,7 @@ namespace LiteDB
         /// <summary>
         /// When used, can define a deserialization function from bson value
         /// </summary>
-        public Func<BsonValue, BsonMapper, object> Deserialize { get; set; }
+        public Func<BsonValue, BsonMapper, IDictionary<string, object>, object> Deserialize { get; set; }
 
         /// <summary>
         /// Is this property an DbRef? Must implement Serialize/Deserialize delegates

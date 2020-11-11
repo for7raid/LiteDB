@@ -4,6 +4,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using static LiteDB.Constants;
+using System.Collections.Concurrent;
 
 namespace LiteDB
 {
@@ -43,22 +44,22 @@ namespace LiteDB
         /// <summary>
         /// Deserialize a BsonDocument to entity class
         /// </summary>
-        public virtual object ToObject(Type type, BsonDocument doc)
+        public virtual object ToObject(Type type, BsonDocument doc, IDictionary<string, object> _memCache = null)
         {
             if (doc == null) throw new ArgumentNullException(nameof(doc));
 
             // if T is BsonDocument, just return them
             if (type == typeof(BsonDocument)) return doc;
 
-            return this.Deserialize(type, doc);
+            return this.Deserialize(type, doc, _memCache);
         }
 
         /// <summary>
         /// Deserialize a BsonDocument to entity class
         /// </summary>
-        public virtual T ToObject<T>(BsonDocument doc)
+        public virtual T ToObject<T>(BsonDocument doc, IDictionary<string, object> _memCache = null)
         {
-            return (T)this.ToObject(typeof(T), doc);
+            return (T)this.ToObject(typeof(T), doc, _memCache);
         }
 
         /// <summary>
@@ -76,8 +77,11 @@ namespace LiteDB
         /// <summary>
         /// Deserilize a BsonValue to .NET object based on type parameter
         /// </summary>
-        public object Deserialize(Type type, BsonValue value)
+        public object Deserialize(Type type, BsonValue value, IDictionary<string, object> _memCache = null)
         {
+            if (_memCache == null)
+                _memCache = new ConcurrentDictionary<string, object>();
+
             // null value - null returns
             if (value.IsNull) return null;
 
@@ -141,74 +145,81 @@ namespace LiteDB
                 // when array are from an object (like in Dictionary<string, object> { ["array"] = new string[] { "a", "b" } 
                 if (type == typeof(object))
                 {
-                    return this.DeserializeArray(typeof(object), value.AsArray);
+                    return this.DeserializeArray(typeof(object), value.AsArray, _memCache);
                 }
                 if (type.IsArray)
                 {
-                    return this.DeserializeArray(type.GetElementType(), value.AsArray);
+                    return this.DeserializeArray(type.GetElementType(), value.AsArray, _memCache);
                 }
                 else
                 {
-                    return this.DeserializeList(type, value.AsArray);
+                    return this.DeserializeList(type, value.AsArray, _memCache);
                 }
             }
 
             // if value is document, deserialize as document
             else if (value.IsDocument)
-            {
+            {  
                 // if type is anonymous use special handler
                 if (type.IsAnonymousType())
                 {
-                    return this.DeserializeAnonymousType(type, value.AsDocument);
+                    return this.DeserializeAnonymousType(type, value.AsDocument, _memCache);
                 }
 
                 var doc = value.AsDocument;
+                var cacheKey = type.FullName +
+                    (doc.ContainsKey("_id") ? doc["_id"].RawValue.ToString()
+                    : ObjectId.NewObjectId().ToString());
 
-                // test if value is object and has _type
-                if (doc.TryGetValue("_type", out var typeField) && typeField.IsString)
+                return _memCache.GetOrAdd(cacheKey, (s) =>
                 {
-                    type = _typeNameBinder.GetType(typeField.AsString);
 
-                    if (type == null) throw LiteException.InvalidTypedName(typeField.AsString);
-                }
-                // when complex type has no definition (== typeof(object)) use Dictionary<string, object> to better set values
-                else if (type == typeof(object))
-                {
-                    type = typeof(Dictionary<string, object>);
-                }
-
-                var entity = this.GetEntityMapper(type);
-
-                // initialize CreateInstance
-                if (entity.CreateInstance == null)
-                {
-                    entity.CreateInstance =
-                        this.GetTypeCtor(entity) ??
-                        ((BsonDocument v) => Reflection.CreateInstance(entity.ForType));
-                }
-
-                var o = _typeInstantiator(type) ?? entity.CreateInstance(doc);
-
-                if (o is IDictionary dict)
-                {
-                    if (o.GetType().GetTypeInfo().IsGenericType)
+                    // test if value is object and has _type
+                    if (doc.TryGetValue("_type", out var typeField) && typeField.IsString)
                     {
-                        var k = type.GetGenericArguments()[0];
-                        var t = type.GetGenericArguments()[1];
+                        type = _typeNameBinder.GetType(typeField.AsString);
 
-                        this.DeserializeDictionary(k, t, dict, value.AsDocument);
+                        if (type == null) throw LiteException.InvalidTypedName(typeField.AsString);
+                    }
+                    // when complex type has no definition (== typeof(object)) use Dictionary<string, object> to better set values
+                    else if (type == typeof(object))
+                    {
+                        type = typeof(Dictionary<string, object>);
+                    }
+
+                    var entity = this.GetEntityMapper(type);
+
+                    // initialize CreateInstance
+                    if (entity.CreateInstance == null)
+                    {
+                        entity.CreateInstance =
+                            this.GetTypeCtor(entity) ??
+                            ((BsonDocument v) => Reflection.CreateInstance(entity.ForType));
+                    }
+
+                    var o = _typeInstantiator(type) ?? entity.CreateInstance(doc);
+
+                    if (o is IDictionary dict)
+                    {
+                        if (o.GetType().GetTypeInfo().IsGenericType)
+                        {
+                            var k = type.GetGenericArguments()[0];
+                            var t = type.GetGenericArguments()[1];
+
+                            this.DeserializeDictionary(k, t, dict, value.AsDocument, _memCache);
+                        }
+                        else
+                        {
+                            this.DeserializeDictionary(typeof(object), typeof(object), dict, value.AsDocument, _memCache);
+                        }
                     }
                     else
                     {
-                        this.DeserializeDictionary(typeof(object), typeof(object), dict, value.AsDocument);
+                        this.DeserializeObject(entity, o, doc, _memCache);
                     }
-                }
-                else
-                {
-                    this.DeserializeObject(entity, o, doc);
-                }
 
-                return o;
+                    return o;
+                });
             }
 
             // in last case, return value as-is - can cause "cast error"
@@ -216,20 +227,20 @@ namespace LiteDB
             return value.RawValue;
         }
 
-        private object DeserializeArray(Type type, BsonArray array)
+        private object DeserializeArray(Type type, BsonArray array, IDictionary<string, object> _memCache)
         {
             var arr = Array.CreateInstance(type, array.Count);
             var idx = 0;
 
             foreach (var item in array)
             {
-                arr.SetValue(this.Deserialize(type, item), idx++);
+                arr.SetValue(this.Deserialize(type, item, _memCache), idx++);
             }
 
             return arr;
         }
 
-        private object DeserializeList(Type type, BsonArray value)
+        private object DeserializeList(Type type, BsonArray value, IDictionary<string, object> _memCache)
         {
             var itemType = Reflection.GetListItemType(type);
             var enumerable = (IEnumerable)Reflection.CreateInstance(type);
@@ -238,7 +249,7 @@ namespace LiteDB
             {
                 foreach (BsonValue item in value)
                 {
-                    list.Add(this.Deserialize(itemType, item));
+                    list.Add(this.Deserialize(itemType, item, _memCache));
                 }
             }
             else
@@ -247,26 +258,26 @@ namespace LiteDB
 
                 foreach (BsonValue item in value)
                 {
-                    addMethod.Invoke(enumerable, new[] { this.Deserialize(itemType, item) });
+                    addMethod.Invoke(enumerable, new[] { this.Deserialize(itemType, item, _memCache) });
                 }
             }
 
             return enumerable;
         }
 
-        private void DeserializeDictionary(Type K, Type T, IDictionary dict, BsonDocument value)
+        private void DeserializeDictionary(Type K, Type T, IDictionary dict, BsonDocument value, IDictionary<string, object> _memCache)
         {
             var isKEnum = K.GetTypeInfo().IsEnum;
             foreach (var el in value.GetElements())
             {
                 var k = isKEnum ? Enum.Parse(K, el.Key) : K == typeof(Uri) ? new Uri(el.Key) : Convert.ChangeType(el.Key, K);
-                var v = this.Deserialize(T, el.Value);
+                var v = this.Deserialize(T, el.Value, _memCache);
 
                 dict.Add(k, v);
             }
         }
 
-        private void DeserializeObject(EntityMapper entity, object obj, BsonDocument value)
+        private void DeserializeObject(EntityMapper entity, object obj, BsonDocument value, IDictionary<string, object> _memCache)
         {
             foreach (var member in entity.Members.Where(x => x.Setter != null))
             {
@@ -275,24 +286,24 @@ namespace LiteDB
                     // check if has a custom deserialize function
                     if (member.Deserialize != null)
                     {
-                        member.Setter(obj, member.Deserialize(val, this));
+                        member.Setter(obj, member.Deserialize(val, this, _memCache));
                     }
                     else
                     {
-                        member.Setter(obj, this.Deserialize(member.DataType, val));
+                        member.Setter(obj, this.Deserialize(member.DataType, val, _memCache));
                     }
                 }
             }
         }
 
-        private object DeserializeAnonymousType(Type type, BsonDocument value)
+        private object DeserializeAnonymousType(Type type, BsonDocument value, IDictionary<string, object> _memCache)
         {
             var args = new List<object>();
             var ctor = type.GetConstructors()[0];
 
             foreach (var par in ctor.GetParameters())
             {
-                var arg = this.Deserialize(par.ParameterType, value[par.Name]);
+                var arg = this.Deserialize(par.ParameterType, value[par.Name], _memCache);
 
                 args.Add(arg);
             }

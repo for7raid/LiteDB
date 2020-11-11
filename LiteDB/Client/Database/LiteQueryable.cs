@@ -1,5 +1,6 @@
 ﻿using LiteDB.Engine;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -19,15 +20,18 @@ namespace LiteDB
         protected readonly string _collection;
         protected readonly Query _query;
 
+        protected readonly IDictionary<string, object> _memCache;
+
         // indicate that T type are simple and result are inside first document fields (query always return a BsonDocument)
         private readonly bool _isSimpleType = Reflection.IsSimpleType(typeof(T));
 
-        internal LiteQueryable(ILiteEngine engine, BsonMapper mapper, string collection, Query query)
+        internal LiteQueryable(ILiteEngine engine, BsonMapper mapper, string collection, Query query, IDictionary<string, object> memCache = null)
         {
             _engine = engine;
             _mapper = mapper;
             _collection = collection;
             _query = query;
+            _memCache = memCache ?? new ConcurrentDictionary<string, object>();
         }
 
         #region Includes
@@ -173,7 +177,7 @@ namespace LiteDB
         {
             _query.Select = selector;
 
-            return new LiteQueryable<BsonDocument>(_engine, _mapper, _collection, _query);
+            return new LiteQueryable<BsonDocument>(_engine, _mapper, _collection, _query, _memCache);
         }
 
         /// <summary>
@@ -185,7 +189,7 @@ namespace LiteDB
 
             _query.Select = _mapper.GetExpression(selector);
 
-            return new LiteQueryable<K>(_engine, _mapper, _collection, _query);
+            return new LiteQueryable<K>(_engine, _mapper, _collection, _query, _memCache);
         }
 
         #endregion
@@ -266,7 +270,7 @@ namespace LiteDB
             else
             {
                 return this.ToDocuments()
-                    .Select(x => (T)_mapper.Deserialize(typeof(T), x));
+                    .Select(x => (T)_mapper.Deserialize(typeof(T), x, _memCache));
             }
         }
 
